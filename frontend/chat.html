@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Chat - 会话</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="sidebar">
+        <div class="me">
+          <div>
+            <div class="name" id="me-name"></div>
+            <div class="tag">已登录</div>
+          </div>
+        </div>
+        <div class="contacts" id="contacts"></div>
+      </aside>
+      <main class="chat">
+        <div class="header">
+          <div>
+            <div id="peer-name" style="font-weight:700;"></div>
+            <div class="tag">聊天窗口</div>
+          </div>
+          <div>
+            <button id="btn-logout" style="background:#ef4444;">退出登录</button>
+          </div>
+        </div>
+        <div class="messages" id="messages"></div>
+        <div class="composer">
+          <input id="input-text" type="text" placeholder="输入消息..." />
+          <button id="btn-send">发送</button>
+        </div>
+      </main>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+  </html>
+
+
