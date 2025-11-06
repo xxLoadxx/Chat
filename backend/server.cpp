@@ -26,6 +26,8 @@
 #include <algorithm>
 #include <filesystem>
 #include <sstream>
+#include <condition_variable>
+#include <fstream>
 
 // 极简 JSON 工具：仅支持本项目所需的功能
 static std::string jsonEscape(const std::string &s){
@@ -127,9 +129,9 @@ struct HttpResponse {
     int status = 200;
     std::vector<std::pair<std::string,std::string>> headers {{"Content-Type","text/plain; charset=utf-8"}};
     std::string body;
-    void setJson(const json &j) {
+    void setJson(const std::string &jsonText) {
         setHeader("Content-Type","application/json; charset=utf-8");
-        body = j.dump();
+        body = jsonText;
     }
     void setHeader(const std::string &k, const std::string &v){
         for (auto &p: headers) if (p.first==k){ p.second=v; return; }
@@ -300,7 +302,7 @@ static void handleClient(int cfd, const std::string &staticRoot) {
     if (!parseRequest(cfd, req)) { net::closeSocket(cfd); return; }
 
     auto notFound = [&](){ res.status=404; res.setHeader("Content-Type","text/plain; charset=utf-8"); res.body = "Not Found"; };
-    auto badReq = [&](const std::string &msg){ res.status=400; res.setJson({{"error", msg}}); };
+    auto badReq = [&](const std::string &msg){ jsonResponseRaw(res, 400, std::string("{\"error\":\"") + jsonEscape(msg) + "\"}"); };
 
     // API 路由
     if (req.path.rfind("/api/", 0) == 0) {
@@ -322,8 +324,8 @@ static void handleClient(int cfd, const std::string &staticRoot) {
             return (void)jsonResponseRaw(res, 200, js);
         }
         if (req.path == "/api/contacts" && req.method == "GET") {
-            auto token = parseBearer(req); if (!token) return (void)jsonResponse(res, 401, {{"error","未授权"}});
-            auto session = g_store.auth(*token); if (!session) return (void)jsonResponse(res, 401, {{"error","会话无效"}});
+            auto token = parseBearer(req); if (!token) return (void)jsonResponseRaw(res, 401, "{\"error\":\"未授权\"}");
+            auto session = g_store.auth(*token); if (!session) return (void)jsonResponseRaw(res, 401, "{\"error\":\"会话无效\"}");
             auto list = g_store.contacts(session->username);
             std::string js = "{\"contacts\":[";
             for (size_t i=0;i<list.size();++i){ if(i) js+=","; js += "\"" + jsonEscape(list[i]) + "\""; }
@@ -331,8 +333,8 @@ static void handleClient(int cfd, const std::string &staticRoot) {
             return (void)jsonResponseRaw(res, 200, js);
         }
         if (req.path == "/api/send" && req.method == "POST") {
-            auto token = parseBearer(req); if (!token) return (void)jsonResponse(res, 401, {{"error","未授权"}});
-            auto session = g_store.auth(*token); if (!session) return (void)jsonResponse(res, 401, {{"error","会话无效"}});
+            auto token = parseBearer(req); if (!token) return (void)jsonResponseRaw(res, 401, "{\"error\":\"未授权\"}");
+            auto session = g_store.auth(*token); if (!session) return (void)jsonResponseRaw(res, 401, "{\"error\":\"会话无效\"}");
             auto kv = parseJsonFlatStringObject(req.body);
             std::string to = kv["to"];
             std::string text = kv["text"];
@@ -342,9 +344,9 @@ static void handleClient(int cfd, const std::string &staticRoot) {
             return (void)jsonResponseRaw(res, 200, js);
         }
         if (req.path == "/api/messages" && req.method == "GET") {
-            auto token = parseBearer(req); if (!token) return (void)jsonResponse(res, 401, {{"error","未授权"}});
-            auto session = g_store.auth(*token); if (!session) return (void)jsonResponse(res, 401, {{"error","会话无效"}});
-            auto withIt = req.queryParam("with"); if (withIt.empty()) return (void)jsonResponse(res, 400, {{"error","缺少 with 参数"}});
+            auto token = parseBearer(req); if (!token) return (void)jsonResponseRaw(res, 401, "{\"error\":\"未授权\"}");
+            auto session = g_store.auth(*token); if (!session) return (void)jsonResponseRaw(res, 401, "{\"error\":\"会话无效\"}");
+            auto withIt = req.queryParam("with"); if (withIt.empty()) return (void)jsonResponseRaw(res, 400, "{\"error\":\"缺少 with 参数\"}");
             uint64_t since = 0; try { auto s = req.queryParam("since"); if(!s.empty()) since = std::stoull(s); } catch(...) {}
             int wait = 0; try { auto w = req.queryParam("wait"); if(!w.empty()) wait = std::stoi(w); } catch(...) {}
             if (wait > 0) { g_store.waitForNew(since, std::min(wait, 25000)); }
