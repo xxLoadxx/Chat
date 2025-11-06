@@ -13,7 +13,6 @@
 #include <signal.h>
 #endif
 
-#include <nlohmann/json.hpp>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -28,7 +27,49 @@
 #include <filesystem>
 #include <sstream>
 
-using json = nlohmann::json;
+// 极简 JSON 工具：仅支持本项目所需的功能
+static std::string jsonEscape(const std::string &s){
+    std::string o; o.reserve(s.size()+8);
+    for (char c: s){
+        switch(c){
+            case '"': o += "\\\""; break;
+            case '\\': o += "\\\\"; break;
+            case '\n': o += "\\n"; break;
+            case '\r': o += "\\r"; break;
+            case '\t': o += "\\t"; break;
+            default:
+                if ((unsigned char)c < 0x20) { char buf[7]; snprintf(buf,sizeof(buf),"\\u%04x", (unsigned char)c); o += buf; }
+                else o += c; break;
+        }
+    }
+    return o;
+}
+
+// 仅解析形如 {"k":"v", ...} 的扁平字符串对象（忽略转义的复杂情况）
+static std::unordered_map<std::string,std::string> parseJsonFlatStringObject(const std::string &body){
+    std::unordered_map<std::string,std::string> kv;
+    enum S{INIT, KEY, COLON, VALUE, COMMA, DONE}; S st=INIT;
+    std::string key, val; bool inStr=false; bool readingKey=false; bool readingVal=false; bool esc=false;
+    for (size_t i=0;i<body.size();++i){ char c=body[i];
+        if (st==INIT){ if (c=='{') { st=KEY; } }
+        else if (st==KEY){ if (!inStr){ if (c=='"'){ inStr=true; readingKey=true; key.clear(); } else if (c=='}'){ st=DONE; break; } }
+            else { if (esc){ key.push_back(c); esc=false; }
+                   else if (c=='\\'){ esc=true; }
+                   else if (c=='"'){ inStr=false; st=COLON; }
+                   else key.push_back(c); }
+        }
+        else if (st==COLON){ if (c==':'){ st=VALUE; } }
+        else if (st==VALUE){ if (!inStr){ if (c=='"'){ inStr=true; readingVal=true; val.clear(); }
+                                             else if (c=='}'){ if(!key.empty()) kv[key]=""; st=DONE; break; } }
+            else { if (esc){ val.push_back(c); esc=false; }
+                   else if (c=='\\'){ esc=true; }
+                   else if (c=='"'){ inStr=false; kv[key]=val; st=COMMA; }
+                   else val.push_back(c); }
+        }
+        else if (st==COMMA){ if (c==',') st=KEY; else if (c=='}'){ st=DONE; break; } }
+    }
+    return kv;
+}
 
 namespace net {
     static void platformInit() {
@@ -247,10 +288,10 @@ static std::optional<std::string> parseBearer(const HttpRequest &req) {
     return std::nullopt;
 }
 
-static void jsonResponse(HttpResponse &res, int status, const json &obj) {
+static void jsonResponseRaw(HttpResponse &res, int status, const std::string &jsonText) {
     res.status = status;
     res.setHeader("Content-Type", "application/json; charset=utf-8");
-    res.setJson(obj);
+    res.body = jsonText;
 }
 
 // 处理一个连接
@@ -264,42 +305,41 @@ static void handleClient(int cfd, const std::string &staticRoot) {
     // API 路由
     if (req.path.rfind("/api/", 0) == 0) {
         if (req.path == "/api/register" && req.method == "POST") {
-            try {
-                auto body = json::parse(req.body);
-                std::string username = body.value("username", "");
-                std::string password = body.value("password", "");
-                if (username.empty() || password.empty()) return (void)jsonResponse(res, 400, {{"error","用户名与密码必填"}});
-                if (!g_store.registerUser(username, password)) return (void)jsonResponse(res, 409, {{"error","用户已存在"}});
-                return (void)jsonResponse(res, 200, {{"ok", true}});
-            } catch (...) { return (void)jsonResponse(res, 400, {{"error","请求格式错误"}}); }
+            auto kv = parseJsonFlatStringObject(req.body);
+            std::string username = kv["username"];
+            std::string password = kv["password"];
+            if (username.empty() || password.empty()) return (void)jsonResponseRaw(res, 400, "{\"error\":\"用户名与密码必填\"}");
+            if (!g_store.registerUser(username, password)) return (void)jsonResponseRaw(res, 409, "{\"error\":\"用户已存在\"}");
+            return (void)jsonResponseRaw(res, 200, "{\"ok\":true}");
         }
         if (req.path == "/api/login" && req.method == "POST") {
-            try {
-                auto body = json::parse(req.body);
-                std::string username = body.value("username", "");
-                std::string password = body.value("password", "");
-                std::string token;
-                if (!g_store.login(username, password, token)) return (void)jsonResponse(res, 401, {{"error","用户名或密码错误"}});
-                return (void)jsonResponse(res, 200, {{"token", token}, {"username", username}});
-            } catch (...) { return (void)jsonResponse(res, 400, {{"error","请求格式错误"}}); }
+            auto kv = parseJsonFlatStringObject(req.body);
+            std::string username = kv["username"];
+            std::string password = kv["password"];
+            std::string token;
+            if (!g_store.login(username, password, token)) return (void)jsonResponseRaw(res, 401, "{\"error\":\"用户名或密码错误\"}");
+            std::string js = std::string("{\"token\":\"") + jsonEscape(token) + "\",\"username\":\"" + jsonEscape(username) + "\"}";
+            return (void)jsonResponseRaw(res, 200, js);
         }
         if (req.path == "/api/contacts" && req.method == "GET") {
             auto token = parseBearer(req); if (!token) return (void)jsonResponse(res, 401, {{"error","未授权"}});
             auto session = g_store.auth(*token); if (!session) return (void)jsonResponse(res, 401, {{"error","会话无效"}});
             auto list = g_store.contacts(session->username);
-            return (void)jsonResponse(res, 200, {{"contacts", list}});
+            std::string js = "{\"contacts\":[";
+            for (size_t i=0;i<list.size();++i){ if(i) js+=","; js += "\"" + jsonEscape(list[i]) + "\""; }
+            js += "]}";
+            return (void)jsonResponseRaw(res, 200, js);
         }
         if (req.path == "/api/send" && req.method == "POST") {
             auto token = parseBearer(req); if (!token) return (void)jsonResponse(res, 401, {{"error","未授权"}});
             auto session = g_store.auth(*token); if (!session) return (void)jsonResponse(res, 401, {{"error","会话无效"}});
-            try {
-                auto body = json::parse(req.body);
-                std::string to = body.value("to", "");
-                std::string text = body.value("text", "");
-                if (to.empty() || text.empty()) return (void)jsonResponse(res, 400, {{"error","参数缺失"}});
-                uint64_t seq = g_store.sendMessage(session->username, to, text);
-                return (void)jsonResponse(res, 200, {{"ok", true}, {"seq", seq}});
-            } catch (...) { return (void)jsonResponse(res, 400, {{"error","请求格式错误"}}); }
+            auto kv = parseJsonFlatStringObject(req.body);
+            std::string to = kv["to"];
+            std::string text = kv["text"];
+            if (to.empty() || text.empty()) return (void)jsonResponseRaw(res, 400, "{\"error\":\"参数缺失\"}");
+            uint64_t seq = g_store.sendMessage(session->username, to, text);
+            std::string js = std::string("{\"ok\":true,\"seq\":") + std::to_string(seq) + "}";
+            return (void)jsonResponseRaw(res, 200, js);
         }
         if (req.path == "/api/messages" && req.method == "GET") {
             auto token = parseBearer(req); if (!token) return (void)jsonResponse(res, 401, {{"error","未授权"}});
@@ -309,12 +349,22 @@ static void handleClient(int cfd, const std::string &staticRoot) {
             int wait = 0; try { auto w = req.queryParam("wait"); if(!w.empty()) wait = std::stoi(w); } catch(...) {}
             if (wait > 0) { g_store.waitForNew(since, std::min(wait, 25000)); }
             auto msgs = g_store.getMessages(session->username, withIt, since);
-            json arr = json::array(); uint64_t latest = since;
-            for (auto &m : msgs) { arr.push_back({{"seq",m.seq},{"from",m.fromUser},{"to",m.toUser},{"text",m.text},{"ts",m.timestampMs}}); latest = std::max(latest, m.seq); }
-            return (void)jsonResponse(res, 200, {{"messages", arr}, {"latest", latest}});
+            uint64_t latest = since;
+            std::string js = "{\"messages\":[";
+            for (size_t i=0;i<msgs.size();++i){
+                auto &m = msgs[i]; if (i) js += ",";
+                js += "{\"seq\":" + std::to_string(m.seq)
+                    + ",\"from\":\"" + jsonEscape(m.fromUser) + "\""
+                    + ",\"to\":\"" + jsonEscape(m.toUser) + "\""
+                    + ",\"text\":\"" + jsonEscape(m.text) + "\""
+                    + ",\"ts\":" + std::to_string(m.timestampMs) + "}";
+                latest = std::max(latest, m.seq);
+            }
+            js += "],\"latest\":" + std::to_string(latest) + "}";
+            return (void)jsonResponseRaw(res, 200, js);
         }
         if (req.path == "/api/health" && req.method == "GET") {
-            return (void)jsonResponse(res, 200, {{"ok", true}});
+            return (void)jsonResponseRaw(res, 200, "{\"ok\":true}");
         }
         notFound();
     } else {
